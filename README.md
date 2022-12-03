@@ -1,6 +1,6 @@
 # DuCC: Multi-Agent Implicit Coordination via Dual-Channel Consensus
 
-This is the implementation of the paper "Multi-Agent Implicit Coordination via Dual-Channel Consensus", which is written in PyTorch.
+This is the implementation of the paper "Multi-Agent Implicit Coordination via Dual-Channel Consensus" written in PyTorch.
 
 ## Installation instructions
 
