@@ -51,7 +51,7 @@ repre_dim: 20
 k: 10
 repre_batch_size: 128
 update_repre_times: 100
-phi_interval: 12
+phi_interval: 100
 add_reg: False
 init_p: 10
 stable_interval: 200
