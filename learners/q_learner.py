@@ -52,7 +52,6 @@ class QLearner:
         idx_lst = [[] for i in range(self.n_agents)]
         target_phi_reg = copy.deepcopy(self.mac.agent.representation)
         start_loss, end_loss = None, None
-        print('-------------slow slow update phi------------')
         start_time = time.time()
         contrast_loss = []
         reg_loss = []
