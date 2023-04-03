@@ -1,16 +1,16 @@
-import copy
-from components.episode_buffer import EpisodeBatch
-from modules.mixers.qtran import QTranBase
-import torch as th
 from torch.optim import RMSprop, Adam
-
+from torch.optim import RMSprop, Adam
+import numpy as np
+from utils.supcontrast_new import SupConLoss
 
 class QLearner:
     def __init__(self, mac, scheme, logger, args):
         self.args = args
         self.mac = mac
         self.logger = logger
+        self.n_agents = args.n_agents
 
+        self.device = th.device('cuda' if args.use_cuda else 'cpu')
         self.params = list(mac.parameters())
 
         self.last_target_update_episode = 0
@@ -25,11 +25,104 @@ class QLearner:
         self.target_mixer = copy.deepcopy(self.mixer)
 
         self.optimiser = RMSprop(params=self.params, lr=args.lr, alpha=args.optim_alpha, eps=args.optim_eps)
+        self.representation_optim = Adam(params=self.mac.agent.representation.parameters(), lr=0.0001)
 
         # a little wasteful to deepcopy (e.g. duplicates action selector), but should work for any MAC
         self.target_mac = copy.deepcopy(mac)
 
         self.log_stats_t = -self.args.learner_log_interval - 1
+        self.supconLoss = SupConLoss(contrast_mode='all')
+        self.repre_train_step = 0
+        self.stable_coeff = 0.001
+
+    def update_phi(self, t_env: int, episode_num: int, buffer: None, batch_size: 32, writer: None, last_success_rate: 0.0):
+        # update representation
+        buffer.update_prio()
+        if last_success_rate > 0.01:
+            self.stable_coeff = 0.1
+
+        p_lst = [[] for i in range(self.n_agents)]
+        idx_lst = [[] for i in range(self.n_agents)]
+        target_phi_reg = copy.deepcopy(self.mac.agent.representation)
+        start_loss, end_loss = None, None
+        start_time = time.time()
+        contrast_loss = []
+        reg_loss = []
+
+        for j in range(self.args.update_repre_times):
+            # print('j: ', j)
+            individual_loss = []
+            for i in range(self.n_agents):
+                # start_time1 = time.time()
+                # print('i: ', i)
+
+                anchor_obs, positives_obs, negatives_obs, selected_idx, reg_obs = buffer.repre_sample(i)
+                anchor_obs = anchor_obs.to(device=self.device)
+                positives_obs = positives_obs.to(device=self.device)
+                negatives_obs = negatives_obs.to(device=self.device)
+
+                anchor = self.mac.agent.representation(anchor_obs)
+                positives = self.mac.agent.representation(positives_obs)
+                negatives = self.mac.agent.representation(negatives_obs)
+
+                anchor_mask = (1 - anchor_obs.sum(1).eq(0.).float())
+                pos_mask = (1 - positives_obs.sum(2).eq(0.).float()).permute(1, 0)
+                neg_mask = (1 - negatives_obs.sum(2).eq(0.).float()).permute(1, 0)
+
+                supcontrast_loss, p = self.supconLoss(anchor, positives, negatives, anchor_mask, pos_mask, neg_mask)
+                p_lst[i].append(p)
+                idx_lst[i].append(selected_idx)
+
+                # infoNce
+                # info_nce_loss = []
+                # for idx in range(positives.size(1)):
+                #     info_nce_loss.append(info_nce(anchor, positives[:, idx, :], negatives, negative_mode='paired'))
+                # info_nce_loss = th.stack(info_nce_loss)
+                # info_nce_loss = info_nce_loss.mean()
+                # individual_loss.append(info_nce_loss)
+
+                if self.args.add_reg and (self.repre_train_step > self.args.stable_interval):
+                    reg_obs = th.tensor(reg_obs, dtype=th.float32).to(self.device)
+                    with th.no_grad():
+                        reg_feature_old = target_phi_reg(reg_obs)
+                    reg_feature_new = self.mac.agent.representation(reg_obs)
+                    stable_loss = (reg_feature_new - reg_feature_old).pow(2).mean()
+                    supcontrast_loss = supcontrast_loss + stable_loss * self.stable_coeff
+
+                individual_loss.append(supcontrast_loss)
+
+
+            avg_ind_loss = th.stack(individual_loss).mean()
+            self.representation_optim.zero_grad()
+            avg_ind_loss.backward()
+            self.representation_optim.step()
+
+            contrast_loss.append(avg_ind_loss.detach().cpu().numpy())
+
+            if self.args.add_reg:
+                pass
+
+            if self.repre_train_step % 1 == 0:
+                writer.add_scalar('contrast_loss', avg_ind_loss.detach().cpu().numpy(), self.repre_train_step)
+            self.repre_train_step += 1
+
+        print("update phi time", time.time() - start_time)
+        # print('repre_train_step ', self.repre_train_step)
+
+        # update p
+        for i in range(self.n_agents):
+            p_array = np.array(p_lst[i])
+            idx_array = np.array(idx_lst[i])
+            p_array = p_array.reshape(-1, 1)
+            idx_array = idx_array.reshape(-1, idx_array.shape[2])
+            p_array = th.from_numpy(p_array)
+            idx_array = th.from_numpy(idx_array)
+            buffer.update_p(i, p_array, idx_array)
+
+        contrast_loss = np.mean(contrast_loss)
+
+        return contrast_loss
+
 
     def train(self, batch: EpisodeBatch, t_env: int, episode_num: int):
         # Get the relevant quantities
@@ -39,13 +132,14 @@ class QLearner:
         mask = batch["filled"][:, :-1].float()
         mask[:, 1:] = mask[:, 1:] * (1 - terminated[:, :-1])
         avail_actions = batch["avail_actions"]
+        obs = batch["obs"]
 
         # Calculate estimated Q-Values
         mac_out = []
         mac_hidden_states = []
         self.mac.init_hidden(batch.batch_size)
         for t in range(batch.max_seq_length):
-            agent_outs = self.mac.forward(batch, t=t)
+            agent_outs, _ = self.mac.forward(batch, t=t)
             mac_out.append(agent_outs)
             mac_hidden_states.append(self.mac.hidden_states)
         mac_out = th.stack(mac_out, dim=1)  # Concat over time
@@ -60,7 +154,7 @@ class QLearner:
         target_mac_hidden_states = []
         self.target_mac.init_hidden(batch.batch_size)
         for t in range(batch.max_seq_length):
-            target_agent_outs = self.target_mac.forward(batch, t=t)
+            target_agent_outs, _ = self.target_mac.forward(batch, t=t)
             target_mac_out.append(target_agent_outs)
             target_mac_hidden_states.append(self.target_mac.hidden_states)
 
