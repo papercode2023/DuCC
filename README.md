@@ -1,6 +1,6 @@
-# DuCC: Multi-Agent Implicit Coordination via Dual-Channel Consensus
+# Enhancing Multi-Agent Coordination via Dual-Channel Consensus
 
-This is the implementation of the paper "Multi-Agent Implicit Coordination via Dual-Channel Consensus" written in PyTorch.
+This is the implementation of the paper "Enhancing Multi-Agent Coordination via Dual-Channel Consensus" written in PyTorch.
 
 ## Installation instructions
 
@@ -10,7 +10,7 @@ Set up StarCraft II and SMAC:
 bash install_sc2.sh
 ```
 
-This will download SC2.4.10 into the 3rdparty folder and copy the maps necessary to run over. You may also need to set the environment variable for SC2:
+This will download StarCraft II into the 3rdparty folder and copy the maps necessary to run over. You may also need to set the environment variable for SC2:
 
 ```bash
 export SC2PATH=[Your SC2 folder like /abc/xyz/3rdparty/StarCraftII]
